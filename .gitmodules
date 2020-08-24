@@ -2,3 +2,7 @@
 	path = modules/argument-parser
 	url = git@github.com:bash-utilities/argument-parser.git
 	branch = master
+[submodule "trap-failure"]
+	path = modules/trap-failure
+	url = git@github.com:bash-utilities/trap-failure.git
+	branch = master
