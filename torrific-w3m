@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+
+
+## Find true directory script resides in, true name, and true path
+__SOURCE__="${BASH_SOURCE[0]}"
+while [[ -h "${__SOURCE__}" ]]; do
+    __SOURCE__="$(find "${__SOURCE__}" -type l -ls | sed -n 's@^.* -> \(.*\)@\1@p')"
+done
+__DIR__="$(cd -P "$(dirname "${__SOURCE__}")" && pwd)"
+__NAME__="${__SOURCE__##*/}"
+__PATH__="${__DIR__}/${__NAME__}"
+__AUTHOR__='S0AndS0'
+__DESCRIPTION__='Enables clear-net browsing over the Tor network via Lynx web browser'
+
+
+_cfg_path="${__DIR__}/torrific-w3m.cfg"
+_url='https://duckduckgo.com'
+# _url='http://expyuzz4wqqyqhjn.onion/'
+_verbose=''
+_enable_firejail=''
+_enable_socat=''
+_firejail_w3m_profile="/usr/local/etc/firejail/w3m.profile"
+_firejail_socat_profile=""
+_cloud_flare_hiddens_service='dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion'
+
+
+## Provides: 'falure' <line-number> <command> exit-code
+source "${__DIR__}/modules/trap-failure/failure.sh"
+trap 'failure "LINENO" "BASH_LINENO" "${BASH_COMMAND}" "${?}"' ERR
+
+## Provides:  'argument_parser <ref_to_allowed_args> <ref_to_user_supplied_args>'
+source "${__DIR__}/modules/argument-parser/argument-parser.sh"
+
+
+__license__(){
+    _year="$(date +'%Y')"
+    cat <<EOF
+${__DESCRIPTION__}
+Copyright (C) ${_year:-2020} ${__AUTHOR__:-S0AndS0}
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+EOF
+}
+
+
+usage() {
+    local _message="${1}"
+    cat <<EOF
+${__DESCRIPTION__}
+
+
+--help      -h
+
+    Prints this message and exists
+
+
+--license   -l
+
+    Prints license and exits
+
+
+--cfg-path  --cfg='${_cfg_path}'
+
+    Lynx configuration file path
+
+
+--verbose   -v
+
+    Prints full Lynx command and options prior to running
+
+
+--enable-firejail --firejail
+
+    Enaables Firejail customizations, note system defaults are **not** modified
+
+
+--enable-socat     --socat
+
+    Enaables usage of Socat for DNS over Tor
+
+
+--firejail-w3m-profile --w3m-profile="${_firejail_w3m_profile}"
+
+
+${_url}
+
+    Web address to load at start-up
+
+
+## Example
+
+    ${__NAME__} 'https://check.torproject.org/'
+EOF
+
+    if (("${#_message}")); then
+        printf >&2 '\n## Error: %s\n' "${_message}"
+    fi
+}
+
+
+#
+#    Read & save recognized arguments to variables
+#
+_args=("${@}")
+#_args=("${@:?# No arguments provided try: ${__NAME__} help}")
+_valid_args=('--help|-h|help:bool'
+             '--license|-l|license:bool'
+             '--verbose|-v:bool'
+             '--enable-firejail|--firejail:bool'
+             '--enable-socat|--socat:bool'
+             '--useragent:print'
+             '--cfg-path|--cfg:path'
+             '--firejail-w3m-profile|--w3m-profile:path'
+             '--firejail-socat-profile|--socat-profile:path'
+             '--url:print-nil')
+argument_parser '_args' '_valid_args'
+_exit_status="$?"
+
+
+((_help)) || ((_exit_status)) && {
+    usage
+    exit ${_exit_status:-0}
+}
+
+((_license)) && {
+    __license__
+    exit ${_exit_status:-0}
+}
+
+
+[[ -e "$(which w3m)" ]] || {
+    usage 'Cannot find executable path for w3m'
+    exit 1
+}
+
+[[ -f "${_cfg_path}" ]] || {
+    usage "Cannot find configuration file for path -> ${_cfg_path}"
+    exit 1
+}
+
+
+_w3m_opts=(
+    '-config' "${_cfg_path}"
+)
+
+
+_firejail_opts=(
+    --hosts-file="${__DIR__}/hosts"
+    --dns='127.0.0.1'
+)
+
+((_enable_firejail)) && ((_enable_socat)) && {
+    _firejail_opts+=(
+        --hosts-file="${__DIR__}/hosts"
+        --dns='127.0.0.1'
+    )
+}
+
+[[ -f "${_firejail_w3m_profile}" ]] && ((_enable_firejail)) && {
+   _firejail_opts+=(
+      "--profile=${_firejail_w3m_profile}"
+   )
+}
+
+
+_socat_opts=(
+    'TCP4-LISTEN:443'
+    'reuseaddr'
+    "fork SOCKS4A:127.0.0.1:${_cloud_flare_hiddens_service}:443"
+    'socksport=9150'
+)
+_socat_cfg=("$(printf '%s\n' "$(IFS=,; printf '%s' "${_socat_opts[*]}")")")
+
+
+kill_socat() {
+    local _socat_pid="${1:?No PID provided!}"
+    ((_verbose)) && {
+        printf 'Killing socat PID -> %i\n' "${_socat_pid}"
+    }
+    sudo kill "${_socat_pid}"
+    local _ps_search="$(ps aux | grep "${_socat_pid}" | grep -v grep)"
+    (("${#_ps_search}")) && {
+        # printf >&2 'Trying to kill socat again PID -> %i\n' "${_socat_pid}"
+        # sudo kill "${_socat_pid}"
+
+        printf >&2 'Trying to killall socat\n'
+        sudo killall socat
+    }
+}
+
+
+[[ -e "$(which firejail)" ]] && ((_enable_firejail)) && {
+    _w3m_path="$(which -a w3m | head -2 | tail -1)"
+    [[ -e "$(which socat)" ]] && ((_enable_socat)) && {
+        ((_verbose)) && {
+            printf '# DEBUG: sudo %s %s &\n' "$(which socat)" "${_socat_cfg[*]}"
+        }
+        sudo echo "Starting socat..."
+        sudo "$(which socat)" ${_socat_cfg[@]} &
+        _socat_pid="$!"
+        trap "kill_socat ${_socat_pid}" RETURN SIGINT SIGTERM EXIT
+    }
+
+    ((_verbose)) && {
+        printf '# DEBUG: %s %s -- %s %s %s\n' "$(which firejail)" "${_firejail_opts[*]}" "${_w3m_path}" "${_w3m_opts[*]}" "${_url}"
+    }
+    "$(which firejail)" "${_firejail_opts[@]}" -- "${_w3m_path}" "${_w3m_opts[@]}" "${_url}"
+} || {
+    ((_verbose)) && {
+       printf '# DEBUG: %s %s %s\n' "$(which w3m)" "${_w3m_opts[@]}" "${_url}"
+    }
+    "$(which w3m)" "${_w3m_opts[@]}" "${_url}"
+}
